@@ -1,0 +1,4 @@
+[dependencies.splines]
+git = "https://github.com/mlatinov/laplace-splines"
+tag = "0.1.0"
+subdir = "laplace"

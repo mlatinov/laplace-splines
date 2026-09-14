@@ -1,0 +1,8 @@
+root = ["splines"]
+
+[[package]]
+name = "splines"
+version = "0.1.0"
+checksum = "sha256:81738dc6d173cd8d1852b4be65c1a5f084c1310bf9abfa5721924469317a8f52"
+source = "git+https://github.com/mlatinov/laplace-splines@0.1.0#laplace"
+dependencies = []
