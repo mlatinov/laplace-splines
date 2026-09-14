@@ -221,8 +221,7 @@ data {
 transformed data {
   int degree = 3;
   int K = n_seg + degree;
-  vector[n_seg + 2 * degree + 1] t
-    = splines::bspline_knots_uniform(min(x), max(x), n_seg, degree);
+  vector[n_seg + 2 * degree + 1] t = splines::bspline_knots_uniform(min(x), max(x), n_seg, degree);
   matrix[N, K] B = splines::bspline_basis(x, t, degree);
 }
 
@@ -274,8 +273,7 @@ data {
 transformed data {
   int degree = 3;
   int K = n_seg + degree;
-  vector[n_seg + 2 * degree + 1] t
-    = splines::bspline_knots_uniform(min(x), max(x), n_seg, degree);
+  vector[n_seg + 2 * degree + 1] t = splines::bspline_knots_uniform(min(x), max(x), n_seg, degree);
   matrix[N, K] B = splines::bspline_basis(x, t, degree);
 }
 
@@ -283,10 +281,8 @@ parameters {
   vector[2] head;
   vector[K - 2] z;
   real<lower=0> sd_smooth;
-
   matrix[K, J] z_group;                // group deviations, non-centred
   real<lower=0> omega;                 // how far groups may depart
-
   real<lower=0> sigma;
 }
 
@@ -314,8 +310,7 @@ transformed parameters {
   vector[K] beta_pop = splines::pspline(head, z, sd_smooth, 2);
   matrix[K, J] beta_j;
   for (j in 1:J)
-    beta_j[, j] = beta_pop
-                + splines::pspline(head_g[, j], z_group[, j], omega, 2);
+    beta_j[, j] = beta_pop + splines::pspline(head_g[, j], z_group[, j], omega, 2);
 }
 ```
 
@@ -344,8 +339,7 @@ transformed data {
   for (i in 1:n_knot)
     xi[i] = min(dose) + i * (max(dose) - min(dose)) / (n_knot + 1);
 
-  vector[n_knot + 2 * degree + 2] t
-    = splines::bspline_knots_clamped(min(dose), max(dose), xi, degree);
+  vector[n_knot + 2 * degree + 2] t = splines::bspline_knots_clamped(min(dose), max(dose), xi, degree);
   int K = (n_knot + 2 * degree + 2) - order;
   matrix[N, K] I = splines::ispline_basis(dose, t, order);
 }
