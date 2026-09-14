@@ -1,4 +1,4 @@
-name = "laplace"
+name = "splines"
 version = "0.1.0"
 exports = [
     "bspline_knots_clamped",
