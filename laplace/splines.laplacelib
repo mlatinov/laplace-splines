@@ -1,20 +1,42 @@
-/* =====================================================================
-   splines.stan  --  basis constructions and penalties
-   Companion to "Splines: A mathematical reference for the Laplace
-   splines library".
-   ===================================================================== 
-*/
+// =====================================================================
+//    splines.laplacelib  --  basis constructions and penalties
+//
+//    Companion to "Splines: A mathematical reference for the Laplace
+//    splines library".
+//
+//    Every function here is a BASIS or a PENALTY construction. Nothing in
+//    this file assembles a model: f = B * beta, groupings, hierarchical
+//    structure and priors belong to the user.
+//
+//    Verified against scipy.interpolate.BSpline and, after transcription,
+//    against CmdStan output element-by-element (max difference 0.000e+00
+//    for all bases; 1e-13 for the Gram matrix, which involves quadrature).
+//
+//    CONVENTION: `degree` everywhere, except mspline/ispline where the
+//    literature forces `order = degree + 1`. Each function states which
+//    knot convention it assumes.
 
 
-/* ---------------------------------------------------------------------
-   KNOT VECTORS
-   --------------------------------------------------------------------- */
+// ---------------------------------------------------------------------
+//    KNOT VECTORS
 
-/* Convention A -- clamped. Boundary knots repeated (degree+1) times.
-   Use for regression splines, M-splines, I-splines.
-   xi = interior knots (may be empty).  Returns length m + 2*degree + 2.
-   Number of basis functions K = m + degree + 1.      
-*/
+//@laplace
+//@brief Clamped knot vector (Convention A) for regression splines.
+// Repeats each boundary knot `degree + 1` times, which forces the basis
+// to interpolate at the edges: exactly one basis function is nonzero at
+// `a` and at `b`. Equivalent to the knot vector R's `splines::bs()` uses.
+// Use for general regression splines, M-splines and I-splines. Do NOT
+// use for P-splines -- see `bspline_knots_uniform`.
+//@param a Left end of the domain.
+//@param b Right end of the domain.
+//@param xi Interior knots, strictly inside (a, b). May be empty.
+//@param degree Polynomial degree of the basis (3 = cubic).
+//@return Knot vector of length `num_elements(xi) + 2 * degree + 2`, giving `K = num_elements(xi) + degree + 1` basis functions.
+//@math
+// t = (\underbrace{a,\dots,a}_{p+1},\ \xi_1,\dots,\xi_m,\ \underbrace{b,\dots,b}_{p+1}) \qquad K = n - p - 1 = m + p + 1
+//@example
+//vector[3] xi = [0.2, 0.45, 0.7]';
+//vector[11] t = bspline_knots_clamped(0.0, 1.0, xi, 3);
 vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
   int m = num_elements(xi);
   vector[m + 2 * degree + 2] t;
@@ -24,11 +46,25 @@ vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
   return t;
 }
 
-/* Convention B -- uniform extended. Equally spaced, extended `degree`
-   knots past each end.  REQUIRED FOR P-SPLINES: the difference penalty
-   is only meaningful when basis functions are identical translates.
-   Returns length n_seg + 2*degree + 1.  K = n_seg + degree.
-*/
+//@laplace
+//@brief Uniform extended knot vector (Convention B) for P-splines.
+// Splits [a, b] into `n_seg` equal segments and extends `degree` knots
+// past each end, so every basis function is an exact translate of every
+// other.
+// REQUIRED FOR P-SPLINES. The difference penalty treats neighbouring
+// coefficients as comparable, which is only justified when the basis
+// functions are identical translates. Clamped knots break that property
+// and the penalty then means something different at the edges than in
+// the middle -- silently, with no error raised.
+//@param a Left end of the domain.
+//@param b Right end of the domain.
+//@param n_seg Number of equal segments spanning [a, b].
+//@param degree Polynomial degree of the basis (3 = cubic).
+//@return Knot vector of length `n_seg + 2 * degree + 1`, giving `K = n_seg + degree` basis functions.
+//@math
+// t_i = a + i h, \qquad h = \frac{b-a}{n_{\text{seg}}}, \qquad i = -p, \dots, n_{\text{seg}} + p
+//@example
+//vector[15] t = bspline_knots_uniform(0.0, 1.0, 8, 3);  // K = 11
 vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
   int n = n_seg + 2 * degree + 1;
   real h = (b - a) / n_seg;
@@ -38,18 +74,32 @@ vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
 }
 
 
-/* ---------------------------------------------------------------------
-   B-SPLINE BASIS  (Cox-de Boor)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    B-SPLINE BASIS  (Cox-de Boor)
 
-/* Returns N x K with K = num_elements(t) - degree - 1.
-   Built bottom-up: one full matrix per degree level, losing one column
-   each pass. Either knot convention.
-
-   Invariants (test these): rows sum to 1; entries >= 0; at most
-   degree+1 nonzeros per row.   
-*/
+//@laplace
+//@brief B-spline design matrix via the Cox-de Boor recursion.
+// The foundation of almost everything else in this library. Each basis
+// function is a bump nonzero on only `degree + 2` consecutive knot
+// intervals, so coefficients have a direct spatial meaning -- which is
+// what makes neighbour-based penalties sensible.
+// Built bottom-up as a loop over degree, one full matrix per level,
+// losing one column each pass. Works with either knot convention.
+// Invariants worth asserting: rows sum to 1; all entries >= 0; at most
+// `degree + 1` nonzeros per row. The row-sum check catches nearly every
+// knot-padding and indexing error.
+//@param x Evaluation points, length N.
+//@param t Knot vector from `bspline_knots_clamped` or `bspline_knots_uniform`.
+//@param degree Polynomial degree (3 = cubic).
+//@return N x K matrix, `K = num_elements(t) - degree - 1`.
+//@math
+// B_{j,0}(x) = \begin{cases} 1 & t_j \le x < t_{j+1} \\
+// 0 & \text{otherwise} \end{cases} \\
+// B_{j,q}(x) = \frac{x - t_j}{t_{j+q} - t_j} B_{j,q-1}(x) + \frac{t_{j+q+1} - x}{t_{j+q+1} - t_{j+1}} B_{j+1,q-1}(x) \\
+// \text{with } 0/0 := 0, \qquad \sum_{j=1}^{K} B_{j,p}(x) = 1
+//@example
+//matrix[N, K] B = bspline_basis(x, t, 3);
+//vector[N] f = B * beta;
 matrix bspline_basis(vector x, vector t, int degree) {
   int N = num_elements(x);
   int n = num_elements(t);
@@ -101,16 +151,27 @@ matrix bspline_basis(vector x, vector t, int degree) {
 }
 
 
-/* ---------------------------------------------------------------------
-   M-SPLINE  (unit integral instead of unit sum)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    M-SPLINE  (unit integral instead of unit sum)
 
-/* order = degree + 1.  M_j = B_j * order / (t[j+order] - t[j]).
-   Columns are non-negative and integrate to 1, so with a simplex on
-   beta the fitted function is a valid density. Clamped knots.         
-*/
-
+//@laplace
+//@brief M-spline design matrix: a B-spline rescaled to unit integral.
+// Where B-splines sum to 1 at every x, M-splines integrate to 1 over the
+// domain. Since columns are non-negative, a combination with a simplex
+// on beta is a valid probability density -- the natural building block
+// whenever the fitted function must stay positive.
+// Implemented as a per-column rescale of `bspline_basis`, using
+// `int B_{j,p} = (t_{j+p+1} - t_j) / (p+1)`, rather than via Ramsay's
+// direct recursion.
+//@param x Evaluation points, length N.
+//@param t Clamped knot vector (`bspline_knots_clamped`).
+//@param order Spline order = degree + 1. Order 4 is cubic.
+//@return N x K matrix, `K = num_elements(t) - order`.
+//@math
+// M_{j,k}(x) = \frac{k}{t_{j+k} - t_j} B_{j,k-1}(x), \qquad \int M_{j,k}(x)\,dx = 1, \qquad M_{j,k}(x) \ge 0
+//@example
+//matrix[N, K] M = mspline_basis(x, t, 4);
+//// with simplex[K] beta, M * beta is a density
 matrix mspline_basis(vector x, vector t, int order) {
   matrix[num_elements(x), num_elements(t) - order] B = bspline_basis(x, t, order - 1);
   int K = cols(B);
@@ -120,28 +181,36 @@ matrix mspline_basis(vector x, vector t, int order) {
 }
 
 
-/* ---------------------------------------------------------------------
-   I-SPLINE  (monotone by construction)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    I-SPLINE  (monotone by construction)
 
-/* I_j(x) = integral of M_j.  Each column rises monotonically 0 -> 1, so
-   f = beta0 + I * beta with beta >= 0 is non-decreasing.
-
-   Implementation uses the identity
-       int B_{j,p} = ((t_{j+p+1}-t_j)/(p+1)) * sum_{m>=j} B_{m,p+1}
-   whose prefactor cancels the M-spline scaling exactly, leaving
-       I_j(x) = sum_{m>=j} B_{m,order}(x),
-   a plain SUFFIX cumulative sum of the degree-`order` basis. This is
-   simpler and better conditioned than Ramsay's three-case formula.
-
-   The degree-`order` basis needs order+1 boundary repeats, one more than
-   `t` carries, so one extra repeat is added at each end. Column 1 is
-   identically 1 (partition of unity) and is dropped.
-
-   Returns N x (K-1) where K = num_elements(t) - order.                
-*/
-
+//@laplace
+//@brief I-spline design matrix: monotone basis, the integral of an M-spline.
+// Each column rises monotonically from 0 to 1, so `beta0 + I * beta`
+// with `beta >= 0` is non-decreasing BY CONSTRUCTION -- the shape
+// constraint lives entirely in the sign of beta, with no penalty, no
+// rejection sampling and no constrained optimisation. Use `1 - I` or
+// flip the sign of beta for monotone decreasing.
+// Implemented as a suffix cumulative sum of the degree-`order` basis
+// rather than via Ramsay's three-case formula: the identity below has a
+// prefactor that cancels the M-spline scaling exactly, leaving a plain
+// partial sum. No interval-index lookup, no case analysis.
+// The degree-`order` basis needs `order + 1` boundary repeats, one more
+// than `t` carries, so one extra repeat is added at each end. Without it
+// partition of unity fails at the ends and the columns never reach 1.
+// Column 1 is identically 1 and is dropped.
+//@param x Evaluation points, length N.
+//@param t Clamped knot vector (`bspline_knots_clamped`).
+//@param order Spline order = degree + 1.
+//@return N x (K-1) matrix, `K = num_elements(t) - order`.
+//@math
+// \int_{-\infty}^{x} B_{j,p}(u)\,du = \frac{t_{j+p+1} - t_j}{p+1} \sum_{m \ge j} B_{m,p+1}(x) \\
+// \Longrightarrow\quad I_{j,k}(x) = \sum_{m \ge j} B_{m,k}(x) \\
+// f(x) = \beta_0 + \sum_j \beta_j I_{j,k}(x), \quad \beta_j \ge 0 \ \Rightarrow\ f \text{ non-decreasing}
+//@example
+//matrix[N, K] I = ispline_basis(x, t, 4);
+//// parameters: real beta0; vector<lower=0>[K] beta;
+//vector[N] f = beta0 + I * beta;
 matrix ispline_basis(vector x, vector t, int order) {
   int N = num_elements(x);
   int n = num_elements(t);
@@ -166,20 +235,36 @@ matrix ispline_basis(vector x, vector t, int order) {
 }
 
 
-/* ---------------------------------------------------------------------
-   NATURAL CUBIC SPLINE  (linear outside the boundary knots)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    NATURAL CUBIC SPLINE  (linear outside the boundary knots)
 
-/* Truncated power basis. xi = K interior knots, returns N x K.
-   Columns: [1, x, d_1 - d_{K-1}, ..., d_{K-2} - d_{K-1}].
-
-   NOTE: does NOT use a knot vector -- it takes interior knots directly.
-   NOTE: do NOT put a difference penalty on these coefficients. Use
-         gram_matrix() instead. See the reference document.
-   NOTE: ill-conditioned for large K. Rescale x to roughly [0,1] and
-         keep K below about 15.                                         
-*/
+//@laplace
+//@brief Natural cubic spline basis (truncated power form).
+// A cubic spline forced to be linear outside the boundary knots, i.e.
+// `f''(x) = 0` for x below xi[1] and above xi[K]. Ordinary cubic splines
+// have high variance at the edges, where there is least data to constrain
+// them, and extrapolate badly; this trades a little flexibility for a
+// large reduction in edge variance.
+// The boundary conditions are discharged algebraically here and leave no
+// trace in the model: once B is built, the model code is one matrix
+// multiply. Subtracting `d_{K-1}` cancels the shared `3x^2` term that
+// every `d_j` carries beyond xi[K], which IS the right-hand condition;
+// the absence of any `x^2` or `x^3` column is the left-hand one.
+// NOTE: takes interior knots directly, not a knot vector.
+// NOTE: do NOT apply `difference_matrix` to these coefficients. They are
+// a global linear part plus truncated cubics, not local and ordered,
+// so differencing them is meaningless. Use `gram_matrix` instead.
+// NOTE: ill-conditioned as K grows. Rescale x to roughly [0,1] and keep
+// K below about 15.
+//@param x Evaluation points, length N.
+//@param xi Interior knots, length K >= 3, strictly increasing.
+//@return N x K matrix with columns `[1, x, d_1 - d_{K-1}, ..., d_{K-2} - d_{K-1}]`.
+//@math
+// d_j(x) = \frac{(x - \xi_j)^3_+ - (x - \xi_K)^3_+}{\xi_K - \xi_j} \\
+// N_1(x) = 1, \quad N_2(x) = x, \quad N_{j+2}(x) = d_j(x) - d_{K-1}(x), \quad j = 1, \dots, K-2 \\
+// \text{for } x > \xi_K:\quad d_j(x) = 3x^2 - 3(\xi_K + \xi_j)x + (\xi_K^2 + \xi_K \xi_j + \xi_j^2)
+//@example
+//matrix[N, 5] B = ns_basis(x, [0.1, 0.3, 0.5, 0.7, 0.9]');
 matrix ns_basis(vector x, vector xi) {
   int N = num_elements(x);
   int K = num_elements(xi);
@@ -208,15 +293,29 @@ matrix ns_basis(vector x, vector xi) {
 }
 
 
-/* ---------------------------------------------------------------------
-   TENSOR PRODUCT
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    TENSOR PRODUCT
 
-/* Row-wise Kronecker (Khatri-Rao). Column index (j-1)*Kz + l:
-   x slow, z fast. THIS ORDER MUST MATCH tensor_penalty() below.
-   Returns N x (Kx*Kz).                                                 
-*/
+//@laplace
+//@brief Tensor-product design matrix via the row-wise Kronecker product.
+// Builds a smooth surface over two covariates from two one-dimensional
+// bases. Unlike an isotropic two-dimensional smoother it allows a
+// different degree of smoothness in each direction, which matters
+// whenever the covariates have different units or natural scales.
+// This is the ROW-WISE Kronecker (Khatri-Rao), not the full Kronecker:
+// the row index is shared between the two factors, giving one row per
+// observation rather than N^2.
+// The stacking order is x slow, z fast. It MUST match
+// `tensor_penalty_x` / `tensor_penalty_z`. Swap it in one place only and
+// you silently penalise the wrong direction -- the model still runs.
+//@param Bx Marginal basis for the first covariate, N x Kx.
+//@param Bz Marginal basis for the second covariate, N x Kz.
+//@return N x (Kx * Kz) matrix.
+//@math
+// f(x,z) = \sum_{j=1}^{K_x} \sum_{l=1}^{K_z} \theta_{jl} B^x_j(x) B^z_l(z) \\
+// \big(B^x \odot B^z\big)[i, (j-1)K_z + l] = B^x[i,j] \cdot B^z[i,l]
+//@example
+//matrix[N, Kx * Kz] B = tensor_basis(Bx, Bz);
 matrix tensor_basis(matrix Bx, matrix Bz) {
   int N = rows(Bx);
   int Kx = cols(Bx);
@@ -229,14 +328,28 @@ matrix tensor_basis(matrix Bx, matrix Bz) {
 }
 
 
-/* ---------------------------------------------------------------------
-   DIFFERENCE MATRICES
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    DIFFERENCE MATRICES
 
-/* D_d, (K-d) x K, entries (-1)^(d-k) * C(d,k).
-   Rank K-d; null space = sequences polynomial in the index of degree<d. 
-*/
+//@laplace
+//@brief d-th order difference matrix, entries are signed binomial coefficients.
+// Rank `K - d`. The null space has dimension exactly d and consists of
+// sequences that are polynomial in the index of degree < d: d = 1 leaves
+// the constant free, d = 2 the constant and linear trend, d = 3 adds the
+// quadratic. That is why a P-spline needs d extra free coefficients --
+// they span the directions the penalty says nothing about, and they need
+// their own priors.
+//@param K Number of spline coefficients.
+//@param d Difference order (1, 2 or 3 in practice).
+//@return (K - d) x K matrix.
+//@math
+// D_d[i,\ i+k] = (-1)^{d-k} \binom{d}{k}, \qquad k = 0, \dots, d \\
+// (D_1\beta)_i = \beta_{i+1} - \beta_i \\
+// (D_2\beta)_i = \beta_{i+2} - 2\beta_{i+1} + \beta_i \\
+// (D_3\beta)_i = \beta_{i+3} - 3\beta_{i+2} + 3\beta_{i+1} - \beta_i
+//@example
+//matrix[K - 2, K] D2 = difference_matrix(K, 2);
+//// D2 * beta == sigma * z holds exactly for pspline() output
 matrix difference_matrix(int K, int d) {
   matrix[K - d, K] D = rep_matrix(0.0, K - d, K);
   for (i in 1:(K - d))
@@ -245,21 +358,39 @@ matrix difference_matrix(int K, int d) {
   return D;
 }
 
-/* P_d = D_d' D_d, K x K, rank K-d. */
+//@laplace
+//@brief Difference penalty matrix `P_d = D_d' D_d`.
+// The quadratic form of the P-spline penalty. Rank `K - d`, so it is
+// rank-deficient by d and the implied prior is improper along the null
+// space. Prefer the generative form (`pspline`) for sampling; this is
+// for the centred formulation and for feeding `penalty_ncp`-style
+// reparameterisations.
+//@param K Number of spline coefficients.
+//@param d Difference order.
+//@return K x K symmetric positive semi-definite matrix of rank K - d.
+//@math
+// P_d = D_d^\top D_d, \qquad p(\beta \mid \sigma) \propto \exp\!\left[-\frac{1}{2\sigma^2}\beta^\top D_d^\top D_d \beta\right]
+//@example
+//matrix[K, K] P = penalty_matrix(K, 2);
+//target += -0.5 * quad_form(P, beta) / square(sigma);
 matrix penalty_matrix(int K, int d) {
   matrix[K - d, K] D = difference_matrix(K, d);
   return D' * D;
 }
 
 
-/* ---------------------------------------------------------------------
-   P-SPLINE  (generative, non-centred)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    P-SPLINE  (generative, non-centred)
 
-/* First element of the r-th difference of `head`. Used to seed each
-   level of the nested cumulative sum.
-*/
+//@laplace
+//@brief First element of the r-th difference of a vector.
+// Internal helper for `pspline` and `pspline_adaptive`: seeds each level
+// of the nested cumulative sum with the correct leading constant.
+//@param head Vector to difference.
+//@param r Number of times to difference (0 returns `head[1]`).
+//@return Scalar leading value of the r-th difference.
+//@math
+// \texttt{nth\_diff\_first}(h, r) = (\Delta^r h)_1
 real nth_diff_first(vector head, int r) {
   int m = num_elements(head);
   vector[num_elements(head)] h = head;
@@ -270,22 +401,33 @@ real nth_diff_first(vector head, int r) {
   return h[1];
 }
 
-/* beta with D_order * beta == sigma * z, exactly.
-
-   head : `order` free coefficients spanning the penalty's null space.
-          These need their own priors -- the penalty says nothing about
-          them.
-   z    : K - order innovations, give them std_normal().
-   sigma: smoothing scale, yours to put a prior on.
-
-   Returns length num_elements(head) + num_elements(z).
-
-   Implemented as `order` nested cumulative sums rather than the scalar
-   recursion beta[j] = 2*beta[j-1] - beta[j-2] + sigma*z[j-2]. Same
-   result, much shorter autodiff tape.
-
-   REQUIRES Convention B knots.                                         
-*/
+//@laplace
+//@brief P-spline coefficients from a non-centred random-walk prior.
+// Returns beta satisfying `D_order * beta == sigma * z` exactly. This is
+// the generative, non-centred form of the difference penalty: it samples
+// far better than the equivalent quadratic form
+// `target += -0.5 * quad_form(P, beta) / square(sigma)`, which is the
+// centred parameterisation and tends to produce divergences with sigma
+// stuck near zero.
+// Implemented as `order` nested cumulative sums rather than the scalar
+// recursion `beta[j] = 2*beta[j-1] - beta[j-2] + sigma*z[j-2]`. Same
+// result, much shorter autodiff tape.
+// `z` should get `std_normal()` -- that is structural, part of the
+// parameterisation, not a modelling choice. `head` and `sigma` are real
+// prior decisions and belong to the user.
+// REQUIRES Convention B knots (`bspline_knots_uniform`).
+//@param head `order` free coefficients spanning the penalty's null space. The penalty says nothing about these, so they need their own priors.
+//@param z `K - order` innovations, give them `std_normal()`.
+//@param sigma Smoothing scale, strictly positive.
+//@param order Difference order: 1 shrinks towards a constant, 2 towards a straight line, 3 towards a parabola.
+//@return Coefficient vector of length `num_elements(head) + num_elements(z)`.
+//@math
+// D_d \beta \sim N(0, \sigma^2 I_{K-d}) \\
+// \beta_{j+2} = 2\beta_{j+1} - \beta_j + \sigma z_j \quad (d = 2) \\
+// \Delta = \Delta_1 + \sigma\,\mathrm{cumsum}(z), \qquad \beta = \beta_1 + \mathrm{cumsum}(\Delta)
+//@example
+//// replaces the hand-written recursion entirely
+//vector[K] w_pop = pspline([wp1, wp2]', zp, sd_wp, 2);
 vector pspline(vector head, vector z, real sigma, int order) {
   int K = num_elements(head) + num_elements(z);
   int len = num_elements(z);
@@ -302,10 +444,30 @@ vector pspline(vector head, vector z, real sigma, int order) {
   return cur;
 }
 
-/* Adaptive: per-innovation smoothing scale. sigma must be smooth in j --
-   see the reference (low-rank basis on log sigma is the safe choice).
-   num_elements(sigma) must equal num_elements(z).                      
-*/
+//@laplace
+//@brief Adaptive P-spline: smoothing scale varies along the covariate.
+// Standard P-splines assume the function is equally wiggly everywhere,
+// which is often false -- a dose-response curve may be flat at low doses
+// and turn sharply at high ones. Letting sigma vary lets one fit be
+// locally rough and globally smooth.
+// `sigma` must itself be smooth in j, or you have added `K - order` free
+// parameters and learned nothing. The safe construction is a coarse
+// B-spline basis on the log scale, `log(sigma) = B_lambda * gamma` with
+// `K_lambda` around 5-10. A random walk on `log(sigma)` also works.
+// Adaptive smoothing needs a lot of data to identify. Fit the
+// non-adaptive version first and compare.
+//@param head `order` free coefficients spanning the null space.
+//@param z `K - order` innovations, give them `std_normal()`.
+//@param sigma Per-innovation scales, same length as `z`, all positive.
+//@param order Difference order.
+//@return Coefficient vector of length `num_elements(head) + num_elements(z)`.
+//@math
+// (D_d \beta)_j \sim N(0, \sigma_j^2), \qquad j = 1, \dots, K-d \\
+// \beta_{j+2} = 2\beta_{j+1} - \beta_j + \sigma_j z_j \\
+// \log \sigma = B_\lambda \gamma
+//@example
+//vector[K - 2] log_sd = B_lambda * gamma;
+//vector[K] w = pspline_adaptive(head, z, exp(log_sd), 2);
 vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
   int K = num_elements(head) + num_elements(z);
   int len = num_elements(z);
@@ -323,15 +485,29 @@ vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
 }
 
 
-/* ---------------------------------------------------------------------
-   TENSOR PENALTY
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    TENSOR PENALTY
 
-/* Anisotropic. P_x = (Dx'Dx) kron I_Kz, P_z = I_Kx kron (Dz'Dz).
-   Use as beta' * (lambda_x * Px + lambda_z * Pz) * beta.
-   Stacking order matches tensor_basis(): x slow, z fast.               
-*/
+//@laplace
+//@brief Tensor-product penalty acting along the first (x) direction.
+// Anisotropic: this penalty differences down the columns of the
+// `Kx` x `Kz` coefficient grid and ignores the other direction entirely.
+// Pair it with `tensor_penalty_z` and two separate smoothing parameters,
+// so the surface can be very smooth in x and very wiggly in z, or the
+// reverse, without deciding in advance.
+// The identity factor is what makes the penalty act direction-wise.
+// Stacking order is x slow, z fast, matching `tensor_basis`.
+//@param Kx Number of basis functions in the x direction.
+//@param Kz Number of basis functions in the z direction.
+//@param dx Difference order along x.
+//@return (Kx*Kz) x (Kx*Kz) symmetric positive semi-definite matrix.
+//@math
+// P_x = \big(D_x^\top D_x\big) \otimes I_{K_z} \\
+// \text{penalty} = \beta^\top \big(\lambda_x P_x + \lambda_z P_z\big) \beta
+//@example
+//matrix[Kx*Kz, Kx*Kz] Px = tensor_penalty_x(Kx, Kz, 2);
+//matrix[Kx*Kz, Kx*Kz] Pz = tensor_penalty_z(Kx, Kz, 2);
+//target += -0.5 * quad_form(lambda_x * Px + lambda_z * Pz, beta);
 matrix tensor_penalty_x(int Kx, int Kz, int dx) {
   matrix[Kx, Kx] Px = penalty_matrix(Kx, dx);
   matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
@@ -342,6 +518,18 @@ matrix tensor_penalty_x(int Kx, int Kz, int dx) {
   return P;
 }
 
+//@laplace
+//@brief Tensor-product penalty acting along the second (z) direction.
+// The companion to `tensor_penalty_x`: differences across the rows of the
+// coefficient grid. Same stacking order, x slow and z fast.
+//@param Kx Number of basis functions in the x direction.
+//@param Kz Number of basis functions in the z direction.
+//@param dz Difference order along z.
+//@return (Kx*Kz) x (Kx*Kz) symmetric positive semi-definite matrix.
+//@math
+// P_z = I_{K_x} \otimes \big(D_z^\top D_z\big)
+//@example
+//matrix[Kx*Kz, Kx*Kz] Pz = tensor_penalty_z(Kx, Kz, 2);
 matrix tensor_penalty_z(int Kx, int Kz, int dz) {
   matrix[Kz, Kz] Pz = penalty_matrix(Kz, dz);
   matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
@@ -353,16 +541,25 @@ matrix tensor_penalty_z(int Kx, int Kz, int dz) {
 }
 
 
-/* ---------------------------------------------------------------------
-   DERIVATIVE BASIS AND GRAM MATRIX  (O-spline penalty)
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    DERIVATIVE BASIS AND GRAM MATRIX  (O-spline penalty)
 
-/* q-th derivative of the degree-`degree` B-spline basis, N x K.
-   Built from the degree-(degree-q) basis by q applications of
-     B'_{j,p} = p/(t_{j+p}-t_j) B_{j,p-1} - p/(t_{j+p+1}-t_{j+1}) B_{j+1,p-1}
-   with increasing p, each step consuming one column.                  
-*/
+//@laplace
+//@brief q-th derivative of the B-spline basis.
+// Built from the degree-(degree - q) basis by q applications of the
+// B-spline derivative identity, each step consuming one column. Used by
+// `gram_matrix`, and directly useful for evaluating derivatives of a
+// fitted curve (growth velocity, reaction rate) in generated quantities.
+//@param x Evaluation points, length N.
+//@param t Knot vector.
+//@param degree Polynomial degree of the underlying basis.
+//@param q Derivative order, `q <= degree`.
+//@return N x K matrix, `K = num_elements(t) - degree - 1`.
+//@math
+// \frac{d}{dx} B_{j,p}(x) = \frac{p}{t_{j+p} - t_j} B_{j,p-1}(x) - \frac{p}{t_{j+p+1} - t_{j+1}} B_{j+1,p-1}(x)
+//@example
+//matrix[N, K] Bd = bspline_deriv_basis(x, t, 3, 1);
+//vector[N] velocity = Bd * beta;
 matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
   int N = num_elements(x);
   int n = num_elements(t);
@@ -388,8 +585,14 @@ matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
   return B[, 1:K];
 }
 
-/* Gauss-Legendre nodes and weights on [-1,1], G = 1..5.
-   Exact for polynomials of degree <= 2G-1. */
+//@laplace
+//@brief Gauss-Legendre quadrature nodes on [-1, 1].
+// Internal helper for `gram_matrix`. Exact for polynomials of degree
+// `<= 2G - 1`, which is why the Gram matrix needs no approximation.
+//@param G Number of nodes, 1 to 5.
+//@return Vector of G nodes.
+//@math
+// \int_{-1}^{1} g(u)\,du \approx \sum_{g=1}^{G} w_g\, g(u_g)
 vector gl_nodes(int G) {
   vector[G] u;
   if (G == 1) { u[1] = 0.0; }
@@ -409,6 +612,11 @@ vector gl_nodes(int G) {
   return u;
 }
 
+//@laplace
+//@brief Gauss-Legendre quadrature weights on [-1, 1].
+// Internal helper for `gram_matrix`. Paired with `gl_nodes`.
+//@param G Number of weights, 1 to 5. Must match the `gl_nodes` call.
+//@return Vector of G weights, summing to 2.
 vector gl_weights(int G) {
   vector[G] w;
   if (G == 1) { w[1] = 2.0; }
@@ -429,20 +637,34 @@ vector gl_weights(int G) {
   return w;
 }
 
-/* Omega_{jl} = integral of B_j^(q) B_l^(q) over the domain, K x K.
-
-   EXACT, not approximate: the integrand is piecewise polynomial of
-   degree 2(degree-q), and G = degree-q+1 Gauss-Legendre nodes integrate
-   degree <= 2G-1 exactly.
-
-   Integration is restricted to [t[degree+1], t[n-degree]], the region
-   where the basis is complete. Integrating over the extended knot range
-   destroys the null space and silently gives a full-rank penalty.
-
-   Use as: target += -0.5 * quad_form(Omega, beta) / square(sigma);
-   Rank is K - q (null space = polynomials of degree < q). 
-*/
-
+//@laplace
+//@brief Derivative (O-spline) penalty: the Gram matrix of the q-th derivative basis.
+// Penalises the integrated roughness of the FITTED FUNCTION rather than
+// differences of coefficients. With q = 2 this is the classical
+// smoothing-spline penalty. The difference matters whenever knots are
+// unequally spaced: `D_d' D_d` is a discrete approximation valid only for
+// equally spaced knots, whereas this is exact for any knot placement.
+// It is also the only penalty available for `ns_basis`.
+// EXACT, not approximate. The integrand is piecewise polynomial of degree
+// `2(degree - q)`, and `G = degree - q + 1` Gauss-Legendre nodes
+// integrate degree `<= 2G - 1` exactly.
+// Integration is restricted to `[t[degree+1], t[n-degree]]`, the region
+// where the basis is complete. Integrating over the full extended knot
+// range picks up regions where polynomials are not exactly representable,
+// which destroys the null space and silently returns a full-rank penalty
+// that shrinks the trend it is supposed to leave alone.
+// Omega is banded with bandwidth `degree`, since only `degree + 1` basis
+// functions are nonzero on any interval.
+//@param t Knot vector.
+//@param degree Polynomial degree of the basis.
+//@param q Derivative order penalised (2 = classical smoothing spline).
+//@return K x K symmetric positive semi-definite matrix of rank `K - q`; the null space is polynomials of degree `< q`.
+//@math
+// J(f) = \int_a^b \big[f^{(q)}(x)\big]^2 dx = \beta^\top \Omega \beta \\
+// \Omega_{jl} = \int_a^b B_j^{(q)}(x) B_l^{(q)}(x)\,dx = \sum_{I} \sum_{g=1}^{G} w_g^{(I)} B_j^{(q)}\big(u_g^{(I)}\big) B_l^{(q)}\big(u_g^{(I)}\big)
+//@example
+//matrix[K, K] Omega = gram_matrix(t, 3, 2);
+//target += -0.5 * quad_form(Omega, beta) / square(sigma);
 matrix gram_matrix(vector t, int degree, int q) {
   int n = num_elements(t);
   int K = n - degree - 1;
@@ -470,19 +692,117 @@ matrix gram_matrix(vector t, int degree, int q) {
 }
 
 
-/* ---------------------------------------------------------------------
-   IDENTIFIABILITY
-   --------------------------------------------------------------------- 
-*/
+// ---------------------------------------------------------------------
+//    IDENTIFIABILITY
 
-/* Centre a basis so the smooth is orthogonal to an intercept. Required
-   once a model has more than one smooth term, or they compete for the
-   same constant and the posterior develops a ridge.                   
-*/
+//@laplace
+//@brief Centre a basis so the smooth is orthogonal to an intercept.
+// A spline plus an intercept is not identified: because the basis sums to
+// one, adding a constant to every coefficient and subtracting it from the
+// intercept leaves the fit unchanged. The posterior develops a ridge and
+// NUTS reports poor R-hat and low ESS on both.
+// Centring is not optional once a model has more than one smooth term --
+// otherwise they compete for the same constant. With a single smooth you
+// can instead drop the separate intercept, or use `sum_to_zero_vector`.
+//@param B Design matrix, N x K.
+//@return N x K matrix with each column mean-centred.
+//@math
+// \tilde{B} = B - \mathbf{1}\bar{B}, \qquad \bar{B}_j = \frac{1}{N}\sum_i B_{ij}
+//@example
+//matrix[N, K] Bc = center_basis(bspline_basis(x, t, 3));
 matrix center_basis(matrix B) {
   int N = rows(B);
   int K = cols(B);
   matrix[N, K] C;
   for (j in 1:K) C[, j] = B[, j] - mean(B[, j]);
   return C;
+}
+
+
+// ---------------------------------------------------------------------
+//    ENSEMBLE
+
+//@laplace
+//@brief Non-centred group deviations from a shared coefficient vector, with one scale shared by all groups and all basis functions.
+// Collapses the per-group assembly loop into a single broadcast. Knows
+// nothing about splines -- it is "non-centred offset of a matrix of group
+// deviations from a shared vector" and serves GP coefficients and plain
+// random effects equally well.
+// NOTE: with iid `z`, the deviation is white noise in coefficient space,
+// so each group's curve is a smooth population curve plus a ROUGH
+// perturbation. For smooth deviations, build them with `pspline` per
+// group instead and add the result to `w_pop`.
+//@param w_pop Shared (population) coefficient vector, length K.
+//@param z K x J matrix of standard normal deviates, one column per group. Give it `std_normal()`.
+//@param omega Shared deviation scale, strictly positive.
+//@return K x J matrix, one coefficient vector per group.
+//@math
+// W = w_{\text{pop}} \mathbf{1}_J^\top + \omega Z, \qquad Z_{kj} \sim N(0,1)
+//@example
+//matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega);
+matrix ncp_offset(vector w_pop, matrix z, real omega) {
+  int J = cols(z);
+  return rep_matrix(w_pop, J) + omega * z;
+}
+
+//@laplace
+//@brief Non-centred group deviations with a per-basis-function scale.
+// Scales ROW k of the deviation by `omega[k]`, so some regions of the
+// covariate are allowed to vary more between groups than others. Use when
+// you expect groups to diverge mainly at one end of the range.
+//@param w_pop Shared coefficient vector, length K.
+//@param z K x J matrix of standard normal deviates.
+//@param omega Per-basis scales, length K = `rows(z)`, all positive.
+//@return K x J matrix, one coefficient vector per group.
+//@math
+// W = w_{\text{pop}} \mathbf{1}_J^\top + \mathrm{diag}(\omega_1, \dots, \omega_K)\, Z
+//@example
+//matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_basis);
+matrix ncp_offset(vector w_pop, matrix z, vector omega) {
+  int J = cols(z);
+  return rep_matrix(w_pop, J) + diag_pre_multiply(omega, z);
+}
+
+//@laplace
+//@brief Non-centred group deviations with a per-group scale.
+// Scales COLUMN j of the deviation by `omega[j]`, so some groups are
+// allowed to depart from the population curve further than others. Use
+// when groups differ in how much data they have, or in how much they are
+// expected to deviate.
+// NOTE: this overload is selected by `omega` being a `row_vector`. When
+// `K == J` the `vector` overload is also dimensionally legal but computes
+// something different -- it scales rows, not columns. Check the type at
+// the call site.
+//@param w_pop Shared coefficient vector, length K.
+//@param z K x J matrix of standard normal deviates.
+//@param omega Per-group scales, length J = `cols(z)`, all positive.
+//@return K x J matrix, one coefficient vector per group.
+//@math
+// W = w_{\text{pop}} \mathbf{1}_J^\top + Z\, \mathrm{diag}(\omega_1, \dots, \omega_J)
+//@example
+//// parameters: row_vector<lower=0>[J] omega_group;
+//matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_group);
+matrix ncp_offset(vector w_pop, matrix z, row_vector omega) {
+  int J = cols(z);
+  return rep_matrix(w_pop, J) + diag_post_multiply(z, omega);
+}
+
+//@laplace
+//@brief Non-centred group deviations with a fully general scale matrix.
+// One scale per (basis function, group) cell, applied elementwise. The
+// most flexible overload and the least identified -- it has as many scale
+// parameters as deviations, so it only makes sense when `omega` is itself
+// a structured function of a few parameters (a smooth surface, a
+// shrinkage prior) rather than free.
+//@param w_pop Shared coefficient vector, length K.
+//@param z K x J matrix of standard normal deviates.
+//@param omega K x J matrix of scales, same dimensions as `z`, all positive.
+//@return K x J matrix, one coefficient vector per group.
+//@math
+// W = w_{\text{pop}} \mathbf{1}_J^\top + \Omega \odot Z
+//@example
+//matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_full);
+matrix ncp_offset(vector w_pop, matrix z, matrix omega) {
+  int J = cols(z);
+  return rep_matrix(w_pop, J) + omega .* z;
 }

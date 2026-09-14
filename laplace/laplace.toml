@@ -1,0 +1,27 @@
+name = "laplace"
+version = "0.1.0"
+exports = [
+    "bspline_knots_clamped",
+    "bspline_knots_uniform",
+    "bspline_basis",
+    "mspline_basis",
+    "ispline_basis",
+    "ns_basis",
+    "tensor_basis",
+    "difference_matrix",
+    "penalty_matrix",
+    "nth_diff_first",
+    "pspline",
+    "pspline_adaptive",
+    "tensor_penalty_x",
+    "tensor_penalty_z",
+    "bspline_deriv_basis",
+    "gl_nodes",
+    "gl_weights",
+    "gram_matrix",
+    "center_basis",
+    "ncp_offset",
+    "ncp_offset",
+    "ncp_offset",
+    "ncp_offset",
+]
