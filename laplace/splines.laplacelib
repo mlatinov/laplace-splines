@@ -1,0 +1,488 @@
+/* =====================================================================
+   splines.stan  --  basis constructions and penalties
+   Companion to "Splines: A mathematical reference for the Laplace
+   splines library".
+   ===================================================================== 
+*/
+
+
+/* ---------------------------------------------------------------------
+   KNOT VECTORS
+   --------------------------------------------------------------------- */
+
+/* Convention A -- clamped. Boundary knots repeated (degree+1) times.
+   Use for regression splines, M-splines, I-splines.
+   xi = interior knots (may be empty).  Returns length m + 2*degree + 2.
+   Number of basis functions K = m + degree + 1.      
+*/
+vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
+  int m = num_elements(xi);
+  vector[m + 2 * degree + 2] t;
+  for (i in 1:(degree + 1)) t[i] = a;
+  if (m > 0) t[(degree + 2):(degree + 1 + m)] = xi;
+  for (i in 1:(degree + 1)) t[degree + 1 + m + i] = b;
+  return t;
+}
+
+/* Convention B -- uniform extended. Equally spaced, extended `degree`
+   knots past each end.  REQUIRED FOR P-SPLINES: the difference penalty
+   is only meaningful when basis functions are identical translates.
+   Returns length n_seg + 2*degree + 1.  K = n_seg + degree.
+*/
+vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
+  int n = n_seg + 2 * degree + 1;
+  real h = (b - a) / n_seg;
+  vector[n] t;
+  for (i in 1:n) t[i] = a + (i - 1 - degree) * h;
+  return t;
+}
+
+
+/* ---------------------------------------------------------------------
+   B-SPLINE BASIS  (Cox-de Boor)
+   --------------------------------------------------------------------- 
+*/
+
+/* Returns N x K with K = num_elements(t) - degree - 1.
+   Built bottom-up: one full matrix per degree level, losing one column
+   each pass. Either knot convention.
+
+   Invariants (test these): rows sum to 1; entries >= 0; at most
+   degree+1 nonzeros per row.   
+*/
+matrix bspline_basis(vector x, vector t, int degree) {
+  int N = num_elements(x);
+  int n = num_elements(t);
+  int K = n - degree - 1;
+  matrix[N, n - 1] B = rep_matrix(0.0, N, n - 1);
+
+  // degree 0: indicator of which knot interval each x falls in
+  for (i in 1:N) {
+    int placed = 0;
+    for (j in 1:(n - 1)) {
+      if (t[j] <= x[i] && x[i] < t[j + 1]) {
+        B[i, j] = 1.0;
+        placed = 1;
+        break;
+      }
+    }
+    // x at or beyond the last knot. The degree-0 interval is half-open,
+    // so x = b would otherwise give an all-zero row. Assign it to the
+    // last interval of positive width.
+    if (placed == 0) {
+      for (jr in 1:(n - 1)) {
+        int j = n - jr;
+        if (t[j] < t[j + 1]) {
+          B[i, j] = 1.0;
+          break;
+        }
+      }
+    }
+  }
+
+  // one pass per degree
+  for (q in 1:degree) {
+    int ncol = n - q - 1;
+    matrix[N, n - 1] Bn = rep_matrix(0.0, N, n - 1);
+    for (j in 1:ncol) {
+      real d1 = t[j + q] - t[j];
+      real d2 = t[j + q + 1] - t[j + 1];
+      vector[N] left = rep_vector(0.0, N);
+      vector[N] right = rep_vector(0.0, N);
+      // 0/0 := 0. Triggered wherever knots repeat, i.e. always at the
+      // boundary under Convention A. Guard the DENOMINATOR.
+      if (d1 > 0) left = (x - t[j]) / d1;
+      if (d2 > 0) right = (t[j + q + 1] - x) / d2;
+      Bn[, j] = left .* B[, j] + right .* B[, j + 1];
+    }
+    B = Bn;
+  }
+  return B[, 1:K];
+}
+
+
+/* ---------------------------------------------------------------------
+   M-SPLINE  (unit integral instead of unit sum)
+   --------------------------------------------------------------------- 
+*/
+
+/* order = degree + 1.  M_j = B_j * order / (t[j+order] - t[j]).
+   Columns are non-negative and integrate to 1, so with a simplex on
+   beta the fitted function is a valid density. Clamped knots.         
+*/
+
+matrix mspline_basis(vector x, vector t, int order) {
+  matrix[num_elements(x), num_elements(t) - order] B = bspline_basis(x, t, order - 1);
+  int K = cols(B);
+  matrix[num_elements(x), K] M;
+  for (j in 1:K) M[, j] = B[, j] * order / (t[j + order] - t[j]);
+  return M;
+}
+
+
+/* ---------------------------------------------------------------------
+   I-SPLINE  (monotone by construction)
+   --------------------------------------------------------------------- 
+*/
+
+/* I_j(x) = integral of M_j.  Each column rises monotonically 0 -> 1, so
+   f = beta0 + I * beta with beta >= 0 is non-decreasing.
+
+   Implementation uses the identity
+       int B_{j,p} = ((t_{j+p+1}-t_j)/(p+1)) * sum_{m>=j} B_{m,p+1}
+   whose prefactor cancels the M-spline scaling exactly, leaving
+       I_j(x) = sum_{m>=j} B_{m,order}(x),
+   a plain SUFFIX cumulative sum of the degree-`order` basis. This is
+   simpler and better conditioned than Ramsay's three-case formula.
+
+   The degree-`order` basis needs order+1 boundary repeats, one more than
+   `t` carries, so one extra repeat is added at each end. Column 1 is
+   identically 1 (partition of unity) and is dropped.
+
+   Returns N x (K-1) where K = num_elements(t) - order.                
+*/
+
+matrix ispline_basis(vector x, vector t, int order) {
+  int N = num_elements(x);
+  int n = num_elements(t);
+  vector[n + 2] t_hi;
+  t_hi[1] = t[1];
+  t_hi[2:(n + 1)] = t;
+  t_hi[n + 2] = t[n];
+  {
+    int Khi = (n + 2) - order - 1;
+    matrix[N, Khi] Bhi = bspline_basis(x, t_hi, order);
+    matrix[N, Khi] I;
+    for (i in 1:N) {
+      real acc = 0.0;
+      for (jr in 1:Khi) {
+        int j = Khi - jr + 1;
+        acc += Bhi[i, j];
+        I[i, j] = acc;
+      }
+    }
+    return I[, 2:Khi];
+  }
+}
+
+
+/* ---------------------------------------------------------------------
+   NATURAL CUBIC SPLINE  (linear outside the boundary knots)
+   --------------------------------------------------------------------- 
+*/
+
+/* Truncated power basis. xi = K interior knots, returns N x K.
+   Columns: [1, x, d_1 - d_{K-1}, ..., d_{K-2} - d_{K-1}].
+
+   NOTE: does NOT use a knot vector -- it takes interior knots directly.
+   NOTE: do NOT put a difference penalty on these coefficients. Use
+         gram_matrix() instead. See the reference document.
+   NOTE: ill-conditioned for large K. Rescale x to roughly [0,1] and
+         keep K below about 15.                                         
+*/
+matrix ns_basis(vector x, vector xi) {
+  int N = num_elements(x);
+  int K = num_elements(xi);
+  matrix[N, K] B;
+  vector[N] cK;          // (x - xi_K)^3_+
+  vector[N] dlast;
+
+  for (i in 1:N) cK[i] = x[i] > xi[K] ? pow(x[i] - xi[K], 3) : 0.0;
+
+  B[, 1] = rep_vector(1.0, N);
+  B[, 2] = x;
+
+  {
+    vector[N] c;
+    for (i in 1:N)
+      c[i] = x[i] > xi[K - 1] ? pow(x[i] - xi[K - 1], 3) : 0.0;
+    dlast = (c - cK) / (xi[K] - xi[K - 1]);
+  }
+
+  for (j in 1:(K - 2)) {
+    vector[N] c;
+    for (i in 1:N) c[i] = x[i] > xi[j] ? pow(x[i] - xi[j], 3) : 0.0;
+    B[, j + 2] = (c - cK) / (xi[K] - xi[j]) - dlast;
+  }
+  return B;
+}
+
+
+/* ---------------------------------------------------------------------
+   TENSOR PRODUCT
+   --------------------------------------------------------------------- 
+*/
+
+/* Row-wise Kronecker (Khatri-Rao). Column index (j-1)*Kz + l:
+   x slow, z fast. THIS ORDER MUST MATCH tensor_penalty() below.
+   Returns N x (Kx*Kz).                                                 
+*/
+matrix tensor_basis(matrix Bx, matrix Bz) {
+  int N = rows(Bx);
+  int Kx = cols(Bx);
+  int Kz = cols(Bz);
+  matrix[N, Kx * Kz] B;
+  for (j in 1:Kx)
+    for (l in 1:Kz)
+      B[, (j - 1) * Kz + l] = Bx[, j] .* Bz[, l];
+  return B;
+}
+
+
+/* ---------------------------------------------------------------------
+   DIFFERENCE MATRICES
+   --------------------------------------------------------------------- 
+*/
+
+/* D_d, (K-d) x K, entries (-1)^(d-k) * C(d,k).
+   Rank K-d; null space = sequences polynomial in the index of degree<d. 
+*/
+matrix difference_matrix(int K, int d) {
+  matrix[K - d, K] D = rep_matrix(0.0, K - d, K);
+  for (i in 1:(K - d))
+    for (k in 0:d)
+      D[i, i + k] = (k % 2 == d % 2 ? 1.0 : -1.0) * choose(d, k);
+  return D;
+}
+
+/* P_d = D_d' D_d, K x K, rank K-d. */
+matrix penalty_matrix(int K, int d) {
+  matrix[K - d, K] D = difference_matrix(K, d);
+  return D' * D;
+}
+
+
+/* ---------------------------------------------------------------------
+   P-SPLINE  (generative, non-centred)
+   --------------------------------------------------------------------- 
+*/
+
+/* First element of the r-th difference of `head`. Used to seed each
+   level of the nested cumulative sum.
+*/
+real nth_diff_first(vector head, int r) {
+  int m = num_elements(head);
+  vector[num_elements(head)] h = head;
+  for (s in 1:r) {
+    for (i in 1:(m - 1)) h[i] = h[i + 1] - h[i];
+    m -= 1;
+  }
+  return h[1];
+}
+
+/* beta with D_order * beta == sigma * z, exactly.
+
+   head : `order` free coefficients spanning the penalty's null space.
+          These need their own priors -- the penalty says nothing about
+          them.
+   z    : K - order innovations, give them std_normal().
+   sigma: smoothing scale, yours to put a prior on.
+
+   Returns length num_elements(head) + num_elements(z).
+
+   Implemented as `order` nested cumulative sums rather than the scalar
+   recursion beta[j] = 2*beta[j-1] - beta[j-2] + sigma*z[j-2]. Same
+   result, much shorter autodiff tape.
+
+   REQUIRES Convention B knots.                                         
+*/
+vector pspline(vector head, vector z, real sigma, int order) {
+  int K = num_elements(head) + num_elements(z);
+  int len = num_elements(z);
+  vector[K] cur = rep_vector(0.0, K);
+  cur[1:len] = sigma * z;
+
+  for (r in 1:order) {
+    real lead = nth_diff_first(head, order - r);
+    vector[len] cs = cumulative_sum(cur[1:len]);
+    cur[1] = lead;
+    cur[2:(len + 1)] = lead + cs;
+    len += 1;
+  }
+  return cur;
+}
+
+/* Adaptive: per-innovation smoothing scale. sigma must be smooth in j --
+   see the reference (low-rank basis on log sigma is the safe choice).
+   num_elements(sigma) must equal num_elements(z).                      
+*/
+vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
+  int K = num_elements(head) + num_elements(z);
+  int len = num_elements(z);
+  vector[K] cur = rep_vector(0.0, K);
+  cur[1:len] = sigma .* z;
+
+  for (r in 1:order) {
+    real lead = nth_diff_first(head, order - r);
+    vector[len] cs = cumulative_sum(cur[1:len]);
+    cur[1] = lead;
+    cur[2:(len + 1)] = lead + cs;
+    len += 1;
+  }
+  return cur;
+}
+
+
+/* ---------------------------------------------------------------------
+   TENSOR PENALTY
+   --------------------------------------------------------------------- 
+*/
+
+/* Anisotropic. P_x = (Dx'Dx) kron I_Kz, P_z = I_Kx kron (Dz'Dz).
+   Use as beta' * (lambda_x * Px + lambda_z * Pz) * beta.
+   Stacking order matches tensor_basis(): x slow, z fast.               
+*/
+matrix tensor_penalty_x(int Kx, int Kz, int dx) {
+  matrix[Kx, Kx] Px = penalty_matrix(Kx, dx);
+  matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
+  for (a in 1:Kx)
+    for (b in 1:Kx)
+      for (l in 1:Kz)
+        P[(a - 1) * Kz + l, (b - 1) * Kz + l] = Px[a, b];
+  return P;
+}
+
+matrix tensor_penalty_z(int Kx, int Kz, int dz) {
+  matrix[Kz, Kz] Pz = penalty_matrix(Kz, dz);
+  matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
+  for (j in 1:Kx)
+    for (a in 1:Kz)
+      for (b in 1:Kz)
+        P[(j - 1) * Kz + a, (j - 1) * Kz + b] = Pz[a, b];
+  return P;
+}
+
+
+/* ---------------------------------------------------------------------
+   DERIVATIVE BASIS AND GRAM MATRIX  (O-spline penalty)
+   --------------------------------------------------------------------- 
+*/
+
+/* q-th derivative of the degree-`degree` B-spline basis, N x K.
+   Built from the degree-(degree-q) basis by q applications of
+     B'_{j,p} = p/(t_{j+p}-t_j) B_{j,p-1} - p/(t_{j+p+1}-t_{j+1}) B_{j+1,p-1}
+   with increasing p, each step consuming one column.                  
+*/
+matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
+  int N = num_elements(x);
+  int n = num_elements(t);
+  int K = n - degree - 1;
+  int ncol = n - (degree - q) - 1;
+  matrix[N, n - 1] B = rep_matrix(0.0, N, n - 1);
+  B[, 1:ncol] = bspline_basis(x, t, degree - q);
+
+  for (step in 1:q) {
+    int p_cur = degree - q + step;
+    int nc = ncol - 1;
+    matrix[N, n - 1] Bn = rep_matrix(0.0, N, n - 1);
+    for (j in 1:nc) {
+      real d1 = t[j + p_cur] - t[j];
+      real d2 = t[j + p_cur + 1] - t[j + 1];
+      real a1 = d1 > 0 ? p_cur / d1 : 0.0;
+      real a2 = d2 > 0 ? p_cur / d2 : 0.0;
+      Bn[, j] = a1 * B[, j] - a2 * B[, j + 1];
+    }
+    B = Bn;
+    ncol = nc;
+  }
+  return B[, 1:K];
+}
+
+/* Gauss-Legendre nodes and weights on [-1,1], G = 1..5.
+   Exact for polynomials of degree <= 2G-1. */
+vector gl_nodes(int G) {
+  vector[G] u;
+  if (G == 1) { u[1] = 0.0; }
+  else if (G == 2) {
+    u[1] = -0.5773502691896257; u[2] = 0.5773502691896257;
+  } else if (G == 3) {
+    u[1] = -0.7745966692414834; u[2] = 0.0; u[3] = 0.7745966692414834;
+  } else if (G == 4) {
+    u[1] = -0.8611363115940526; u[2] = -0.3399810435848563;
+    u[3] =  0.3399810435848563; u[4] =  0.8611363115940526;
+  } else if (G == 5) {
+    u[1] = -0.9061798459386640; u[2] = -0.5384693101056831; u[3] = 0.0;
+    u[4] =  0.5384693101056831; u[5] =  0.9061798459386640;
+  } else {
+    reject("gl_nodes: G must be 1..5, got ", G);
+  }
+  return u;
+}
+
+vector gl_weights(int G) {
+  vector[G] w;
+  if (G == 1) { w[1] = 2.0; }
+  else if (G == 2) { w[1] = 1.0; w[2] = 1.0; }
+  else if (G == 3) {
+    w[1] = 0.5555555555555556; w[2] = 0.8888888888888889;
+    w[3] = 0.5555555555555556;
+  } else if (G == 4) {
+    w[1] = 0.3478548451374538; w[2] = 0.6521451548625461;
+    w[3] = 0.6521451548625461; w[4] = 0.3478548451374538;
+  } else if (G == 5) {
+    w[1] = 0.2369268850561891; w[2] = 0.4786286704993665;
+    w[3] = 0.5688888888888889; w[4] = 0.4786286704993665;
+    w[5] = 0.2369268850561891;
+  } else {
+    reject("gl_weights: G must be 1..5, got ", G);
+  }
+  return w;
+}
+
+/* Omega_{jl} = integral of B_j^(q) B_l^(q) over the domain, K x K.
+
+   EXACT, not approximate: the integrand is piecewise polynomial of
+   degree 2(degree-q), and G = degree-q+1 Gauss-Legendre nodes integrate
+   degree <= 2G-1 exactly.
+
+   Integration is restricted to [t[degree+1], t[n-degree]], the region
+   where the basis is complete. Integrating over the extended knot range
+   destroys the null space and silently gives a full-rank penalty.
+
+   Use as: target += -0.5 * quad_form(Omega, beta) / square(sigma);
+   Rank is K - q (null space = polynomials of degree < q). 
+*/
+
+matrix gram_matrix(vector t, int degree, int q) {
+  int n = num_elements(t);
+  int K = n - degree - 1;
+  int G = degree - q + 1 > 1 ? degree - q + 1 : 1;
+  vector[G] u = gl_nodes(G);
+  vector[G] w = gl_weights(G);
+  real a_dom = t[degree + 1];
+  real b_dom = t[n - degree];
+  matrix[K, K] Om = rep_matrix(0.0, K, K);
+
+  for (i in 1:(n - 1)) {
+    real lo = fmax(t[i], a_dom);
+    real hi = fmin(t[i + 1], b_dom);
+    if (hi <= lo) continue;
+    {
+      real half = 0.5 * (hi - lo);
+      real mid  = 0.5 * (hi + lo);
+      vector[G] pts = half * u + rep_vector(mid, G);
+      vector[G] wts = half * w;
+      matrix[G, K] Bd = bspline_deriv_basis(pts, t, degree, q);
+      Om += Bd' * diag_pre_multiply(wts, Bd);
+    }
+  }
+  return Om;
+}
+
+
+/* ---------------------------------------------------------------------
+   IDENTIFIABILITY
+   --------------------------------------------------------------------- 
+*/
+
+/* Centre a basis so the smooth is orthogonal to an intercept. Required
+   once a model has more than one smooth term, or they compete for the
+   same constant and the posterior develops a ridge.                   
+*/
+matrix center_basis(matrix B) {
+  int N = rows(B);
+  int K = cols(B);
+  matrix[N, K] C;
+  for (j in 1:K) C[, j] = B[, j] - mean(B[, j]);
+  return C;
+}
