@@ -173,6 +173,8 @@ laplace doc splines::pspline
 
 ## Installation
 
+**Requires the laplace compiler 0.2 or newer.** `splines`'s public functions are marked with `pub` in its `.laplacelib` sources (there is no `exports` list in its `laplace.toml`), and the manifest declares `laplace = ">=0.2"`. Check your compiler with `laplace --version` and update it with `laplace self-update`. Tags up to `0.1.0` predate this and still build with older compilers.
+
 `splines` is distributed as a git-hosted Laplace library — there's no published registry entry yet, so it's added by pointing `laplace` (or `cmdlaplacer`, if you're working from R) directly at the repository. The package lives in the repository's `laplace/` subdirectory, so pass it as the subdir.
 
 ### Via the `laplace` CLI

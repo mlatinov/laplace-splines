@@ -37,7 +37,7 @@
 //@example
 //vector[3] xi = [0.2, 0.45, 0.7]';
 //vector[11] t = bspline_knots_clamped(0.0, 1.0, xi, 3);
-vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
+pub vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
   int m = num_elements(xi);
   vector[m + 2 * degree + 2] t;
   for (i in 1:(degree + 1)) t[i] = a;
@@ -65,7 +65,7 @@ vector bspline_knots_clamped(real a, real b, vector xi, int degree) {
 // t_i = a + i h, \qquad h = \frac{b-a}{n_{\text{seg}}}, \qquad i = -p, \dots, n_{\text{seg}} + p
 //@example
 //vector[15] t = bspline_knots_uniform(0.0, 1.0, 8, 3);  // K = 11
-vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
+pub vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
   int n = n_seg + 2 * degree + 1;
   real h = (b - a) / n_seg;
   vector[n] t;
@@ -100,7 +100,7 @@ vector bspline_knots_uniform(real a, real b, int n_seg, int degree) {
 //@example
 //matrix[N, K] B = bspline_basis(x, t, 3);
 //vector[N] f = B * beta;
-matrix bspline_basis(vector x, vector t, int degree) {
+pub matrix bspline_basis(vector x, vector t, int degree) {
   int N = num_elements(x);
   int n = num_elements(t);
   int K = n - degree - 1;
@@ -172,7 +172,7 @@ matrix bspline_basis(vector x, vector t, int degree) {
 //@example
 //matrix[N, K] M = mspline_basis(x, t, 4);
 //// with simplex[K] beta, M * beta is a density
-matrix mspline_basis(vector x, vector t, int order) {
+pub matrix mspline_basis(vector x, vector t, int order) {
   matrix[num_elements(x), num_elements(t) - order] B = bspline_basis(x, t, order - 1);
   int K = cols(B);
   matrix[num_elements(x), K] M;
@@ -211,7 +211,7 @@ matrix mspline_basis(vector x, vector t, int order) {
 //matrix[N, K] I = ispline_basis(x, t, 4);
 //// parameters: real beta0; vector<lower=0>[K] beta;
 //vector[N] f = beta0 + I * beta;
-matrix ispline_basis(vector x, vector t, int order) {
+pub matrix ispline_basis(vector x, vector t, int order) {
   int N = num_elements(x);
   int n = num_elements(t);
   vector[n + 2] t_hi;
@@ -265,7 +265,7 @@ matrix ispline_basis(vector x, vector t, int order) {
 // \text{for } x > \xi_K:\quad d_j(x) = 3x^2 - 3(\xi_K + \xi_j)x + (\xi_K^2 + \xi_K \xi_j + \xi_j^2)
 //@example
 //matrix[N, 5] B = ns_basis(x, [0.1, 0.3, 0.5, 0.7, 0.9]');
-matrix ns_basis(vector x, vector xi) {
+pub matrix ns_basis(vector x, vector xi) {
   int N = num_elements(x);
   int K = num_elements(xi);
   matrix[N, K] B;
@@ -316,7 +316,7 @@ matrix ns_basis(vector x, vector xi) {
 // \big(B^x \odot B^z\big)[i, (j-1)K_z + l] = B^x[i,j] \cdot B^z[i,l]
 //@example
 //matrix[N, Kx * Kz] B = tensor_basis(Bx, Bz);
-matrix tensor_basis(matrix Bx, matrix Bz) {
+pub matrix tensor_basis(matrix Bx, matrix Bz) {
   int N = rows(Bx);
   int Kx = cols(Bx);
   int Kz = cols(Bz);
@@ -350,7 +350,7 @@ matrix tensor_basis(matrix Bx, matrix Bz) {
 //@example
 //matrix[K - 2, K] D2 = difference_matrix(K, 2);
 //// D2 * beta == sigma * z holds exactly for pspline() output
-matrix difference_matrix(int K, int d) {
+pub matrix difference_matrix(int K, int d) {
   matrix[K - d, K] D = rep_matrix(0.0, K - d, K);
   for (i in 1:(K - d))
     for (k in 0:d)
@@ -373,7 +373,7 @@ matrix difference_matrix(int K, int d) {
 //@example
 //matrix[K, K] P = penalty_matrix(K, 2);
 //target += -0.5 * quad_form(P, beta) / square(sigma);
-matrix penalty_matrix(int K, int d) {
+pub matrix penalty_matrix(int K, int d) {
   matrix[K - d, K] D = difference_matrix(K, d);
   return D' * D;
 }
@@ -391,7 +391,7 @@ matrix penalty_matrix(int K, int d) {
 //@return Scalar leading value of the r-th difference.
 //@math
 // \texttt{nth\_diff\_first}(h, r) = (\Delta^r h)_1
-real nth_diff_first(vector head, int r) {
+pub real nth_diff_first(vector head, int r) {
   int m = num_elements(head);
   vector[num_elements(head)] h = head;
   for (s in 1:r) {
@@ -428,7 +428,7 @@ real nth_diff_first(vector head, int r) {
 //@example
 //// replaces the hand-written recursion entirely
 //vector[K] w_pop = pspline([wp1, wp2]', zp, sd_wp, 2);
-vector pspline(vector head, vector z, real sigma, int order) {
+pub vector pspline(vector head, vector z, real sigma, int order) {
   int K = num_elements(head) + num_elements(z);
   int len = num_elements(z);
   vector[K] cur = rep_vector(0.0, K);
@@ -468,7 +468,7 @@ vector pspline(vector head, vector z, real sigma, int order) {
 //@example
 //vector[K - 2] log_sd = B_lambda * gamma;
 //vector[K] w = pspline_adaptive(head, z, exp(log_sd), 2);
-vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
+pub vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
   int K = num_elements(head) + num_elements(z);
   int len = num_elements(z);
   vector[K] cur = rep_vector(0.0, K);
@@ -508,7 +508,7 @@ vector pspline_adaptive(vector head, vector z, vector sigma, int order) {
 //matrix[Kx*Kz, Kx*Kz] Px = tensor_penalty_x(Kx, Kz, 2);
 //matrix[Kx*Kz, Kx*Kz] Pz = tensor_penalty_z(Kx, Kz, 2);
 //target += -0.5 * quad_form(lambda_x * Px + lambda_z * Pz, beta);
-matrix tensor_penalty_x(int Kx, int Kz, int dx) {
+pub matrix tensor_penalty_x(int Kx, int Kz, int dx) {
   matrix[Kx, Kx] Px = penalty_matrix(Kx, dx);
   matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
   for (a in 1:Kx)
@@ -530,7 +530,7 @@ matrix tensor_penalty_x(int Kx, int Kz, int dx) {
 // P_z = I_{K_x} \otimes \big(D_z^\top D_z\big)
 //@example
 //matrix[Kx*Kz, Kx*Kz] Pz = tensor_penalty_z(Kx, Kz, 2);
-matrix tensor_penalty_z(int Kx, int Kz, int dz) {
+pub matrix tensor_penalty_z(int Kx, int Kz, int dz) {
   matrix[Kz, Kz] Pz = penalty_matrix(Kz, dz);
   matrix[Kx * Kz, Kx * Kz] P = rep_matrix(0.0, Kx * Kz, Kx * Kz);
   for (j in 1:Kx)
@@ -560,7 +560,7 @@ matrix tensor_penalty_z(int Kx, int Kz, int dz) {
 //@example
 //matrix[N, K] Bd = bspline_deriv_basis(x, t, 3, 1);
 //vector[N] velocity = Bd * beta;
-matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
+pub matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
   int N = num_elements(x);
   int n = num_elements(t);
   int K = n - degree - 1;
@@ -593,7 +593,7 @@ matrix bspline_deriv_basis(vector x, vector t, int degree, int q) {
 //@return Vector of G nodes.
 //@math
 // \int_{-1}^{1} g(u)\,du \approx \sum_{g=1}^{G} w_g\, g(u_g)
-vector gl_nodes(int G) {
+pub vector gl_nodes(int G) {
   vector[G] u;
   if (G == 1) { u[1] = 0.0; }
   else if (G == 2) {
@@ -617,7 +617,7 @@ vector gl_nodes(int G) {
 // Internal helper for `gram_matrix`. Paired with `gl_nodes`.
 //@param G Number of weights, 1 to 5. Must match the `gl_nodes` call.
 //@return Vector of G weights, summing to 2.
-vector gl_weights(int G) {
+pub vector gl_weights(int G) {
   vector[G] w;
   if (G == 1) { w[1] = 2.0; }
   else if (G == 2) { w[1] = 1.0; w[2] = 1.0; }
@@ -665,7 +665,7 @@ vector gl_weights(int G) {
 //@example
 //matrix[K, K] Omega = gram_matrix(t, 3, 2);
 //target += -0.5 * quad_form(Omega, beta) / square(sigma);
-matrix gram_matrix(vector t, int degree, int q) {
+pub matrix gram_matrix(vector t, int degree, int q) {
   int n = num_elements(t);
   int K = n - degree - 1;
   int G = degree - q + 1 > 1 ? degree - q + 1 : 1;
@@ -710,7 +710,7 @@ matrix gram_matrix(vector t, int degree, int q) {
 // \tilde{B} = B - \mathbf{1}\bar{B}, \qquad \bar{B}_j = \frac{1}{N}\sum_i B_{ij}
 //@example
 //matrix[N, K] Bc = center_basis(bspline_basis(x, t, 3));
-matrix center_basis(matrix B) {
+pub matrix center_basis(matrix B) {
   int N = rows(B);
   int K = cols(B);
   matrix[N, K] C;
@@ -740,7 +740,7 @@ matrix center_basis(matrix B) {
 // W = w_{\text{pop}} \mathbf{1}_J^\top + \omega Z, \qquad Z_{kj} \sim N(0,1)
 //@example
 //matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega);
-matrix ncp_offset(vector w_pop, matrix z, real omega) {
+pub matrix ncp_offset(vector w_pop, matrix z, real omega) {
   int J = cols(z);
   return rep_matrix(w_pop, J) + omega * z;
 }
@@ -758,7 +758,7 @@ matrix ncp_offset(vector w_pop, matrix z, real omega) {
 // W = w_{\text{pop}} \mathbf{1}_J^\top + \mathrm{diag}(\omega_1, \dots, \omega_K)\, Z
 //@example
 //matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_basis);
-matrix ncp_offset(vector w_pop, matrix z, vector omega) {
+pub matrix ncp_offset(vector w_pop, matrix z, vector omega) {
   int J = cols(z);
   return rep_matrix(w_pop, J) + diag_pre_multiply(omega, z);
 }
@@ -782,7 +782,7 @@ matrix ncp_offset(vector w_pop, matrix z, vector omega) {
 //@example
 //// parameters: row_vector<lower=0>[J] omega_group;
 //matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_group);
-matrix ncp_offset(vector w_pop, matrix z, row_vector omega) {
+pub matrix ncp_offset(vector w_pop, matrix z, row_vector omega) {
   int J = cols(z);
   return rep_matrix(w_pop, J) + diag_post_multiply(z, omega);
 }
@@ -802,7 +802,7 @@ matrix ncp_offset(vector w_pop, matrix z, row_vector omega) {
 // W = w_{\text{pop}} \mathbf{1}_J^\top + \Omega \odot Z
 //@example
 //matrix[K, J] w_unit = ncp_offset(w_pop, z_sp, omega_full);
-matrix ncp_offset(vector w_pop, matrix z, matrix omega) {
+pub matrix ncp_offset(vector w_pop, matrix z, matrix omega) {
   int J = cols(z);
   return rep_matrix(w_pop, J) + omega .* z;
 }
